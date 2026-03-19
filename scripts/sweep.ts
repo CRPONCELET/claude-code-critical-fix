@@ -1,6 +1,7 @@
 #!/usr/bin/env bun
 
 import { lifecycle, STALE_UPVOTE_THRESHOLD } from "./issue-lifecycle.ts";
+import { githubRequest } from "./github-api.ts";
 
 // --
 
@@ -9,36 +10,6 @@ const DRY_RUN = process.argv.includes("--dry-run");
 
 const CLOSE_MESSAGE = (reason: string) =>
   `Closing for now — ${reason}. Please [open a new issue](${NEW_ISSUE}) if this is still relevant.`;
-
-// --
-
-async function githubRequest<T>(
-  endpoint: string,
-  method = "GET",
-  body?: unknown
-): Promise<T> {
-  const token = process.env.GITHUB_TOKEN;
-  if (!token) throw new Error("GITHUB_TOKEN required");
-
-  const response = await fetch(`https://api.github.com${endpoint}`, {
-    method,
-    headers: {
-      Authorization: `Bearer ${token}`,
-      Accept: "application/vnd.github.v3+json",
-      "User-Agent": "sweep",
-      ...(body && { "Content-Type": "application/json" }),
-    },
-    ...(body && { body: JSON.stringify(body) }),
-  });
-
-  if (!response.ok) {
-    if (response.status === 404) return {} as T;
-    const text = await response.text();
-    throw new Error(`GitHub API ${response.status}: ${text}`);
-  }
-
-  return response.json();
-}
 
 // --
 
@@ -53,7 +24,8 @@ async function markStale(owner: string, repo: string) {
 
   for (let page = 1; page <= 10; page++) {
     const issues = await githubRequest<any[]>(
-      `/repos/${owner}/${repo}/issues?state=open&sort=updated&direction=asc&per_page=100&page=${page}`
+      `/repos/${owner}/${repo}/issues?state=open&sort=updated&direction=asc&per_page=100&page=${page}`,
+      token
     );
     if (issues.length === 0) break;
 
@@ -79,7 +51,7 @@ async function markStale(owner: string, repo: string) {
         const age = Math.floor((Date.now() - updatedAt.getTime()) / 86400000);
         console.log(`#${issue.number}: would label stale (${age}d inactive) — ${issue.title}`);
       } else {
-        await githubRequest(`${base}/labels`, "POST", { labels: ["stale"] });
+        await githubRequest(`${base}/labels`, token, "POST", { labels: ["stale"] });
         console.log(`#${issue.number}: labeled stale — ${issue.title}`);
       }
       labeled++;
@@ -99,7 +71,8 @@ async function closeExpired(owner: string, repo: string) {
 
     for (let page = 1; page <= 10; page++) {
       const issues = await githubRequest<any[]>(
-        `/repos/${owner}/${repo}/issues?state=open&labels=${label}&sort=updated&direction=asc&per_page=100&page=${page}`
+        `/repos/${owner}/${repo}/issues?state=open&labels=${label}&sort=updated&direction=asc&per_page=100&page=${page}`,
+        token
       );
       if (issues.length === 0) break;
 
@@ -112,7 +85,7 @@ async function closeExpired(owner: string, repo: string) {
 
         const base = `/repos/${owner}/${repo}/issues/${issue.number}`;
 
-        const events = await githubRequest<any[]>(`${base}/events?per_page=100`);
+        const events = await githubRequest<any[]>(`${base}/events?per_page=100`, token);
 
         const labeledAt = events
           .filter((e) => e.event === "labeled" && e.label?.name === label)
@@ -125,7 +98,8 @@ async function closeExpired(owner: string, repo: string) {
         // The triage workflow should remove lifecycle labels on human
         // activity, but check here too as a safety net.
         const comments = await githubRequest<any[]>(
-          `${base}/comments?since=${labeledAt.toISOString()}&per_page=100`
+          `${base}/comments?since=${labeledAt.toISOString()}&per_page=100`,
+          token
         );
         const hasHumanComment = comments.some(
           (c) => c.user && c.user.type !== "Bot"
@@ -141,8 +115,8 @@ async function closeExpired(owner: string, repo: string) {
           const age = Math.floor((Date.now() - labeledAt.getTime()) / 86400000);
           console.log(`#${issue.number}: would close (${label}, ${age}d old) — ${issue.title}`);
         } else {
-          await githubRequest(`${base}/comments`, "POST", { body: CLOSE_MESSAGE(reason) });
-          await githubRequest(base, "PATCH", { state: "closed", state_reason: "not_planned" });
+          await githubRequest(`${base}/comments`, token, "POST", { body: CLOSE_MESSAGE(reason) });
+          await githubRequest(base, token, "PATCH", { state: "closed", state_reason: "not_planned" });
           console.log(`#${issue.number}: closed (${label})`);
         }
         closed++;
@@ -154,6 +128,9 @@ async function closeExpired(owner: string, repo: string) {
 }
 
 // --
+
+const token = process.env.GITHUB_TOKEN;
+if (!token) throw new Error("GITHUB_TOKEN required");
 
 const owner = process.env.GITHUB_REPOSITORY_OWNER;
 const repo = process.env.GITHUB_REPOSITORY_NAME;

@@ -6,7 +6,6 @@ This hook checks for security patterns in file edits and warns about potential v
 
 import json
 import os
-import random
 import sys
 from datetime import datetime
 
@@ -223,9 +222,24 @@ def main():
     if security_reminder_enabled == "0":
         sys.exit(0)
 
-    # Periodically clean up old state files (10% chance per run)
-    if random.random() < 0.1:
-        cleanup_old_state_files()
+    # Deterministic cleanup: run at most once per hour.
+    # Uses a marker file's mtime to track the last cleanup run, avoiding
+    # both the non-determinism of random-based cleanup and the risk of
+    # unbounded state file accumulation.
+    cleanup_marker = os.path.expanduser("~/.claude/.security_cleanup_marker")
+    try:
+        should_cleanup = True
+        if os.path.exists(cleanup_marker):
+            last_cleanup = os.path.getmtime(cleanup_marker)
+            should_cleanup = (datetime.now().timestamp() - last_cleanup) >= 3600
+        if should_cleanup:
+            cleanup_old_state_files()
+            # Touch the marker file to record this cleanup run
+            os.makedirs(os.path.dirname(cleanup_marker), exist_ok=True)
+            with open(cleanup_marker, "w") as f:
+                f.write("")
+    except Exception:
+        pass  # Cleanup failures must not block the hook
 
     # Read input from stdin
     try:

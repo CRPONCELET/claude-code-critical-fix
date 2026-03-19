@@ -89,7 +89,8 @@ def extract_frontmatter(content: str) -> tuple[Dict[str, Any], str]:
 
     Returns (frontmatter_dict, message_body).
 
-    Supports multi-line dictionary items in lists by preserving indentation.
+    Uses PyYAML (yaml.safe_load) for robust parsing. Falls back to a minimal
+    hand-rolled parser if PyYAML is not installed.
     """
     if not content.startswith('---'):
         return {}, content
@@ -102,28 +103,43 @@ def extract_frontmatter(content: str) -> tuple[Dict[str, Any], str]:
     frontmatter_text = parts[1]
     message = parts[2].strip()
 
-    # Simple YAML parser that handles indented list items
-    frontmatter = {}
+    try:
+        import yaml
+        frontmatter = yaml.safe_load(frontmatter_text)
+        if not isinstance(frontmatter, dict):
+            return {}, message
+        return frontmatter, message
+    except ImportError:
+        # PyYAML not available — use minimal fallback parser
+        return _parse_frontmatter_fallback(frontmatter_text), message
+    except Exception as e:
+        print(f"Warning: YAML parse error, trying fallback: {e}", file=sys.stderr)
+        return _parse_frontmatter_fallback(frontmatter_text), message
+
+
+def _parse_frontmatter_fallback(frontmatter_text: str) -> Dict[str, Any]:
+    """Minimal YAML-like parser for environments without PyYAML.
+
+    Handles simple key-value pairs, lists of strings, and lists of dicts.
+    This is intentionally limited — install PyYAML for full YAML support.
+    """
+    frontmatter: Dict[str, Any] = {}
     lines = frontmatter_text.split('\n')
 
-    current_key = None
-    current_list = []
-    current_dict = {}
+    current_key: Optional[str] = None
+    current_list: list = []
+    current_dict: Dict[str, Any] = {}
     in_list = False
     in_dict_item = False
 
     for line in lines:
-        # Skip empty lines and comments
         stripped = line.strip()
         if not stripped or stripped.startswith('#'):
             continue
 
-        # Check indentation level
         indent = len(line) - len(line.lstrip())
 
-        # Top-level key (no indentation or minimal)
-        if indent == 0 and ':' in line and not line.strip().startswith('-'):
-            # Save previous list/dict if any
+        if indent == 0 and ':' in line and not stripped.startswith('-'):
             if in_list and current_key:
                 if in_dict_item and current_dict:
                     current_list.append(current_dict)
@@ -138,31 +154,26 @@ def extract_frontmatter(content: str) -> tuple[Dict[str, Any], str]:
             value = value.strip()
 
             if not value:
-                # Empty value - list or nested structure follows
                 current_key = key
                 in_list = True
                 current_list = []
             else:
-                # Simple key-value pair
                 value = value.strip('"').strip("'")
                 if value.lower() == 'true':
-                    value = True
+                    frontmatter[key] = True
                 elif value.lower() == 'false':
-                    value = False
-                frontmatter[key] = value
+                    frontmatter[key] = False
+                else:
+                    frontmatter[key] = value
 
-        # List item (starts with -)
         elif stripped.startswith('-') and in_list:
-            # Save previous dict item if any
             if in_dict_item and current_dict:
                 current_list.append(current_dict)
                 current_dict = {}
 
             item_text = stripped[1:].strip()
 
-            # Check if this is an inline dict (key: value on same line)
             if ':' in item_text and ',' in item_text:
-                # Inline comma-separated dict: "- field: command, operator: regex_match"
                 item_dict = {}
                 for part in item_text.split(','):
                     if ':' in part:
@@ -171,28 +182,23 @@ def extract_frontmatter(content: str) -> tuple[Dict[str, Any], str]:
                 current_list.append(item_dict)
                 in_dict_item = False
             elif ':' in item_text:
-                # Start of multi-line dict item: "- field: command"
                 in_dict_item = True
                 k, v = item_text.split(':', 1)
                 current_dict = {k.strip(): v.strip().strip('"').strip("'")}
             else:
-                # Simple list item
                 current_list.append(item_text.strip('"').strip("'"))
                 in_dict_item = False
 
-        # Continuation of dict item (indented under list item)
         elif indent > 2 and in_dict_item and ':' in line:
-            # This is a field of the current dict item
             k, v = stripped.split(':', 1)
             current_dict[k.strip()] = v.strip().strip('"').strip("'")
 
-    # Save final list/dict if any
     if in_list and current_key:
         if in_dict_item and current_dict:
             current_list.append(current_dict)
         frontmatter[current_key] = current_list
 
-    return frontmatter, message
+    return frontmatter
 
 
 def load_rules(event: Optional[str] = None) -> List[Rule]:
